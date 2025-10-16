@@ -1,0 +1,7 @@
+pandas
+sqlalchemy
+psycopg2-binary
+transformers
+sentence-transformers
+pgvector
+boto3
