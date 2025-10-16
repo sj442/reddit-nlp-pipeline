@@ -1,9 +1,5 @@
 version: 0.2
 
-# ---- CONFIGURATION ----
-AWS_REGION="us-east-1"               
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-
 phases:
   pre_build:
     commands:
