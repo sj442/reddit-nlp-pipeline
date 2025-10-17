@@ -17,8 +17,6 @@ def load_model(model_name="all-MiniLM-L6-v2"):
 def get_embeddings(model, texts):
     return model.encode(texts, show_progress_bar=True)
 
-
-
 import re
 import nltk
 from nltk.corpus import stopwords
@@ -38,7 +36,6 @@ def clean_text(text):
     text = text.lower()
     words = [lemmatizer.lemmatize(w) for w in text.split() if w not in STOPWORDS]
     return " ".join(words)
-
 
 
 from sqlalchemy import text
