@@ -108,7 +108,7 @@ def update_post(DB_CONN, post_id, sentiment, embedding):
     with DB_CONN.cursor() as cur:
         cur.execute("""
             UPDATE reddit
-            SET sentiment = %s, embedding = %s::vector, processed = TRUE
+            SET sentiment_score = %s, embedding = %s::vector, processed = TRUE
             WHERE id = %s
         """, (sentiment, embedding, post_id))
     DB_CONN.commit()
@@ -128,8 +128,8 @@ def main():
 
         update_clean_text_db(DB_CONN, post)
 
-        sentiment, embedding = process_post(model, post)
-        update_post(DB_CONN, post[0], sentiment, embedding)
+        sentiment_score, embedding = process_post(model, post)
+        update_post(DB_CONN, post[0], sentiment_score, embedding)
 
     print(f"Processed {len(posts)} posts")
 
