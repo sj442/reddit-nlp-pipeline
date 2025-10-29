@@ -98,7 +98,7 @@ def fetch_unprocessed(DB_CONN):
         cur.execute("SELECT id, title, selftext FROM reddit WHERE processed = FALSE LIMIT 500")
         return cur.fetchall()
 
-def process_post(post):
+def process_post(model, post):
     text = (post[1] or '') + ' ' + (post[2] or '')
     sentiment = sent_analyzer.polarity_scores(text)['compound']
     embedding = get_embeddings(model, text).tolist()
@@ -128,7 +128,7 @@ def main():
 
         update_clean_text_db(DB_CONN, post)
 
-        sentiment, embedding = process_post(post)
+        sentiment, embedding = process_post(model, post)
         update_post(DB_CONN, post[0], sentiment, embedding)
 
     print(f"Processed {len(posts)} posts")
