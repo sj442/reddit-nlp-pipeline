@@ -17,7 +17,6 @@ phases:
       - echo Pushing the Docker image to ECR...
       - docker push $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/reddit-nlp-pipeline:latest
       - echo Writing imagedefinitions.json...
-      # Added for automatic ECS service deployment
       - printf '[{"name":"reddit-nlp-container","imageUri":"%s"}]' "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/reddit-nlp-pipeline:latest" > imagedefinitions.json
       - echo Build completed successfully.
 
