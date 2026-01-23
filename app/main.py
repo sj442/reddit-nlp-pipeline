@@ -1,12 +1,17 @@
 import os
-import pandas as pd
-from sqlalchemy import create_engine
-from sentence_transformers import SentenceTransformer
-from pgvector.sqlalchemy import Vector
-
-import os
+import json
+import uuid
 import logging
+import boto3
+import pandas as pd
+import csv
+from io import StringIO
+from datetime import datetime, timezone
+import re
 
+# =========================
+# Logging
+# =========================
 def setup_logger():
     logging.basicConfig(
         level=logging.INFO,
@@ -14,126 +19,235 @@ def setup_logger():
     )
     return logging.getLogger(__name__)
 
-# Sentiment Analysis
+logger = setup_logger()
+
+# =========================
+# S3 config (env vars)
+# =========================
+SOURCE_BUCKET = os.environ["SOURCE_BUCKET"]
+SOURCE_PREFIX = os.environ.get("SOURCE_PREFIX", "reddit_csv/")
+
+TARGET_BUCKET = os.environ.get("TARGET_BUCKET", SOURCE_BUCKET)
+TARGET_PREFIX = os.environ.get("TARGET_PREFIX", "reddit_nlp_csv/")
+
+s3 = boto3.client("s3")
+
+# =========================
+# NLP: Sentiment
+# =========================
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
-nltk.download('vader_lexicon')
 
+nltk.download("vader_lexicon", quiet=True)
 sent_analyzer = SentimentIntensityAnalyzer()
 
 def get_sentiment(text):
-    score = sent_analyzer.polarity_scores(text)['compound']
-    return score  # ranges from -1 (neg) to +1 (pos)
+    return sent_analyzer.polarity_scores(text)["compound"]
 
-# Generate Embeddings
-from sentence_transformers import SentenceTransformer
-
-def load_model(model_name="all-MiniLM-L6-v2"):
-    return SentenceTransformer(model_name)
-
-def get_embeddings(model, texts):
-    return model.encode(texts, show_progress_bar=True)
-
-# Text preprocessing
-import re
+# =========================
+# NLP: Text preprocessing
+# =========================
 from nltk.corpus import stopwords
 from nltk.stem import WordNetLemmatizer
 
+nltk.download("stopwords", quiet=True)
+nltk.download("wordnet", quiet=True)
 
-nltk.download('stopwords', quiet=True)
-nltk.download('wordnet', quiet=True)
-
-STOPWORDS = set(stopwords.words('english'))
+STOPWORDS = set(stopwords.words("english"))
 lemmatizer = WordNetLemmatizer()
 
 def clean_text(text):
     if not text:
         return ""
-    text = re.sub(r"http\S+", "", text)         # remove URLs
-    text = re.sub(r"[^a-zA-Z\s]", "", text)     # remove punctuation/numbers
+    text = re.sub(r"http\S+", "", text)
+    text = re.sub(r"[^a-zA-Z\s]", "", text)
     text = text.lower()
     words = [lemmatizer.lemmatize(w) for w in text.split() if w not in STOPWORDS]
     return " ".join(words)
 
-def update_clean_text_db(DB_CONN, post):
-    clean_title = clean_text(post[1])
-    clean_selftext = clean_text(post[2])
-    post_id = post[0]
-    with DB_CONN.cursor() as cur:
-        cur.execute("""
-            UPDATE reddit
-            SET title = %s, selftext = %s
-            WHERE id = %s
-        """, (clean_title, clean_selftext, post_id))
-    DB_CONN.commit()
-
-# Keyword Extraction
-import sklearn
+# =========================
+# NLP: Keywords
+# =========================
 from sklearn.feature_extraction.text import TfidfVectorizer
 
 def extract_keywords(corpus, top_n=5):
-    vectorizer = TfidfVectorizer(stop_words='english')
+    vectorizer = TfidfVectorizer(stop_words="english")
     X = vectorizer.fit_transform(corpus)
     feature_array = vectorizer.get_feature_names_out()
+
     keywords_per_doc = []
     for row in X:
-        tfidf_scores = zip(feature_array, row.toarray()[0])
-        top_terms = sorted(tfidf_scores, key=lambda x: x[1], reverse=True)[:top_n]
-        keywords_per_doc.append([term for term, score in top_terms])
+        scores = zip(feature_array, row.toarray()[0])
+        top_terms = sorted(scores, key=lambda x: x[1], reverse=True)[:top_n]
+        keywords_per_doc.append([term for term, _ in top_terms])
+
     return keywords_per_doc
 
-# Database connection
-import psycopg2
+# =========================
+# S3 helpers
+# =========================
+DATE_RE = re.compile(r"^ingest_dt=(\d{4}-\d{2}-\d{2})/$")
 
-def connect_to_db():
-    DB_CONN = psycopg2.connect(
-    host=os.environ['DB_HOST'],
-    dbname=os.environ['DB_NAME'],
-    user=os.environ['DB_USER'],
-    password=os.environ['DB_PASSWORD'])
-    return DB_CONN
+def _ensure_trailing_slash(p: str) -> str:
+    return p if p.endswith("/") else p + "/"
 
-def fetch_unprocessed(DB_CONN):
-    with DB_CONN.cursor() as cur:
-        cur.execute("SELECT id, title, selftext FROM reddit WHERE processed = FALSE LIMIT 500")
-        return cur.fetchall()
+def list_ingest_dt_partitions(bucket: str, base_prefix: str) -> list[str]:
+    prefix = _ensure_trailing_slash(base_prefix)
+    token = None
+    dates = set()
 
-def process_post(model, post):
-    text = (post[1] or '') + ' ' + (post[2] or '')
-    sentiment = sent_analyzer.polarity_scores(text)['compound']
-    embedding = get_embeddings(model, text).tolist()
-    return sentiment, embedding
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": prefix, "Delimiter": "/"}
+        if token:
+            kwargs["ContinuationToken"] = token
 
-def update_post(DB_CONN, post_id, sentiment, embedding):
-    with DB_CONN.cursor() as cur:
-        cur.execute("""
-            UPDATE reddit
-            SET sentiment_score = %s, embedding = %s::vector, processed = TRUE
-            WHERE id = %s
-        """, (sentiment, embedding, post_id))
-    DB_CONN.commit()
+        resp = s3.list_objects_v2(**kwargs)
+        for cp in resp.get("CommonPrefixes", []):
+            folder = cp["Prefix"][len(prefix):]  # e.g. "ingest_dt=2026-01-18/"
+            m = DATE_RE.match(folder)
+            if m:
+                dates.add(m.group(1))
 
+        if resp.get("IsTruncated"):
+            token = resp.get("NextContinuationToken")
+        else:
+            break
 
+    return sorted(dates)
+
+def ingest_partition_exists(bucket: str, base_prefix: str, ingest_dt: str) -> bool:
+    prefix = f"{_ensure_trailing_slash(base_prefix)}ingest_dt={ingest_dt}/"
+    resp = s3.list_objects_v2(Bucket=bucket, Prefix=prefix, MaxKeys=1)
+    return "Contents" in resp and len(resp["Contents"]) > 0
+
+def list_csvs_for_ingest_dt(bucket: str, base_prefix: str, ingest_dt: str) -> list[str]:
+    prefix = f"{_ensure_trailing_slash(base_prefix)}ingest_dt={ingest_dt}/"
+    keys = []
+    token = None
+
+    while True:
+        kwargs = {"Bucket": bucket, "Prefix": prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+
+        resp = s3.list_objects_v2(**kwargs)
+        for obj in resp.get("Contents", []):
+            k = obj["Key"]
+            if k.endswith(".csv"):
+                keys.append(k)
+
+        if resp.get("IsTruncated"):
+            token = resp.get("NextContinuationToken")
+        else:
+            break
+
+    return keys
+
+def load_csv_from_s3(bucket, key):
+    obj = s3.get_object(Bucket=bucket, Key=key)
+    return pd.read_csv(obj["Body"])
+
+def write_csv_to_s3(df, bucket, base_prefix, ingest_dt):
+    out_key = f"{_ensure_trailing_slash(base_prefix)}ingest_dt={ingest_dt}/part-{uuid.uuid4().hex}.csv"
+
+    buf = StringIO()
+    df.to_csv(
+        buf,
+        index=False,
+        quoting=csv.QUOTE_ALL,
+        lineterminator="\n",
+    )
+
+    s3.put_object(
+        Bucket=bucket,
+        Key=out_key,
+        Body=buf.getvalue().encode("utf-8"),
+        ContentType="text/csv",
+    )
+    return out_key
+
+# =========================
+# Pipeline
+# =========================
+def run_for_ingest_dt(ingest_dt: str):
+    logger.info(f"Running NLP for ingest_dt={ingest_dt}")
+
+    csv_keys = list_csvs_for_ingest_dt(SOURCE_BUCKET, SOURCE_PREFIX, ingest_dt)
+    logger.info(f"Found {len(csv_keys)} input CSV(s)")
+
+    if not csv_keys:
+        logger.warning("No CSV files found for this ingest_dt. Exiting.")
+        return {"rows_in": 0, "rows_out": 0, "ingest_dt": ingest_dt}
+
+    df = pd.concat([load_csv_from_s3(SOURCE_BUCKET, k) for k in csv_keys], ignore_index=True)
+    logger.info(f"Loaded {len(df)} rows")
+
+    for col in ["id", "title", "selftext"]:
+        if col not in df.columns:
+            raise ValueError(f"Missing expected column '{col}' in input CSV schema")
+
+    df["clean_title"] = df["title"].fillna("").apply(clean_text)
+    df["clean_selftext"] = df["selftext"].fillna("").apply(clean_text)
+    combined = (df["clean_title"] + " " + df["clean_selftext"]).fillna("")
+
+    logger.info("Running sentiment analysis")
+    df["sentiment_score"] = combined.apply(get_sentiment)
+
+    logger.info("Extracting keywords")
+    df["keywords"] = extract_keywords(combined.tolist(), top_n=5)
+
+    df["processed_dt"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+    out_key = write_csv_to_s3(df, TARGET_BUCKET, TARGET_PREFIX, ingest_dt)
+    logger.info(f"Wrote NLP output to s3://{TARGET_BUCKET}/{out_key}")
+
+    return {"rows_in": int(len(df)), "rows_out": int(len(df)), "ingest_dt": ingest_dt, "output": out_key}
+
+def pick_ingest_dt(event: dict) -> str:
+    """
+    Priority:
+      1) If event explicitly provides ingest_dt, use it.
+      2) Prefer today's UTC ingest_dt if that partition exists.
+      3) Otherwise fall back to latest available partition.
+    """
+    if isinstance(event, dict) and event.get("ingest_dt"):
+        ingest_dt = event["ingest_dt"]
+        if not re.match(r"^\d{4}-\d{2}-\d{2}$", ingest_dt):
+            raise ValueError(f"Invalid ingest_dt format: {ingest_dt}")
+        return ingest_dt
+
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if ingest_partition_exists(SOURCE_BUCKET, SOURCE_PREFIX, today_utc):
+        return today_utc
+
+    dates = list_ingest_dt_partitions(SOURCE_BUCKET, SOURCE_PREFIX)
+    if not dates:
+        raise ValueError(f"No ingest_dt partitions found under s3://{SOURCE_BUCKET}/{SOURCE_PREFIX}")
+    return dates[-1]
+
+# Lambda entrypoint for EventBridge schedule
+def lambda_handler(event, context):
+    ingest_dt = pick_ingest_dt(event or {})
+    result = run_for_ingest_dt(ingest_dt)
+    return {"statusCode": 200, "body": json.dumps(result)}
+
+# Local/ECS entrypoint (optional)
 def main():
+    """
+    Local testing options:
+      - Set TEST_INGEST_DT=YYYY-MM-DD
+      - OR set TEST_EVENT_JSON='{"ingest_dt":"YYYY-MM-DD"}'
+      - Otherwise it will try today's UTC, else latest partition.
+    """
+    test_event_json = os.environ.get("TEST_EVENT_JSON")
+    if test_event_json:
+        event = json.loads(test_event_json)
+    else:
+        test_ingest_dt = os.environ.get("TEST_INGEST_DT")
+        event = {"ingest_dt": test_ingest_dt} if test_ingest_dt else {}
 
-    print("Loading sentence transformers model..")
-    model = load_model()
-
-    print("Connecting to DB...")
-    DB_CONN = connect_to_db()
-
-    print("Fetching new posts...")
-    posts = fetch_unprocessed(DB_CONN)
-    for post in posts:
-
-        update_clean_text_db(DB_CONN, post)
-
-        sentiment_score, embedding = process_post(model, post)
-        update_post(DB_CONN, post[0], sentiment_score, embedding)
-
-    print(f"Processed {len(posts)} posts")
-
-    print("Done!")
+    ingest_dt = pick_ingest_dt(event)
+    print(run_for_ingest_dt(ingest_dt))
 
 if __name__ == "__main__":
     main()
