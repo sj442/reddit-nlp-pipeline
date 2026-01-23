@@ -20,6 +20,7 @@ phases:
       - printf '[{"name":"reddit-nlp-container","imageUri":"%s"}]' "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/reddit-nlp-pipeline:latest" > imagedefinitions.json
       - echo Build completed successfully.
 
+# Added for automatic ECS service deployment
 artifacts:
   files:
     - imagedefinitions.json
