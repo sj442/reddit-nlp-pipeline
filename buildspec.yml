@@ -5,13 +5,22 @@ phases:
     commands:
       - echo Logging in to Amazon ECR...
       - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
   build:
     commands:
       - echo Building the Docker image...
       - docker build -t reddit-nlp-pipeline .
       - docker tag reddit-nlp-pipeline:latest $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/reddit-nlp-pipeline:latest
+
   post_build:
     commands:
       - echo Pushing the Docker image to ECR...
       - docker push $ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/reddit-nlp-pipeline:latest
+      - echo Writing imagedefinitions.json...
+      - printf '[{"name":"reddit-nlp-container","imageUri":"%s"}]' "$ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/reddit-nlp-pipeline:latest" > imagedefinitions.json
       - echo Build completed successfully.
+
+artifacts:
+  files:
+    - imagedefinitions.json
+
