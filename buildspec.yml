@@ -28,6 +28,7 @@ phases:
       - cat imagedefinitions.json
 
 artifacts:
+  # Artifacts needed for ECS Deploy
   files:
     - imagedefinitions.json
 
