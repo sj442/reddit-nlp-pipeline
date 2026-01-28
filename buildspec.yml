@@ -27,6 +27,13 @@ phases:
       - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPOSITORY_URI:$IMAGE_TAG" > imagedefinitions.json
       - ls -la
       - cat imagedefinitions.json
+      - echo "=== PWD ==="
+      - pwd
+      - echo "=== LIST FILES ==="
+      - ls -la
+      - echo "=== SHOW IMAGEDEFINITIONS ==="
+      - cat imagedefinitions.json || (echo "imagedefinitions.json NOT FOUND" && exit 1)
+
 
 artifacts:
   # Artifacts needed for ECS Deploy
