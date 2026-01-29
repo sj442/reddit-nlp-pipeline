@@ -3,43 +3,31 @@ version: 0.2
 env:
   variables:
     AWS_DEFAULT_REGION: us-east-1
-    IMAGE_REPO_NAME: reddit-nlp-pipeline   # <-- your ECR repo name (confirm)
-    CONTAINER_NAME: reddit-nlp-container    # <-- must match container name in ECS task definition
+    IMAGE_REPO_NAME: reddit-nlp-pipeline   # <-- your ECR repo name
 
 phases:
   pre_build:
     commands:
       - echo Logging in to Amazon ECR...
-      - aws ecr get-login-password --region $AWS_DEFAULT_REGION | docker login --username AWS --password-stdin 839103534010.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION |
+        docker login --username AWS --password-stdin 839103534010.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:-latest}
+
       - REPOSITORY_URI=839103534010.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
 
   build:
     commands:
       - echo Build started on `date`
+      - echo Building Docker image...
       - docker build -t $REPOSITORY_URI:$IMAGE_TAG .
+
+      - echo Pushing commit-tagged image to ECR...
       - docker push $REPOSITORY_URI:$IMAGE_TAG
 
-  post_build:
-    commands:
-      - echo Writing imagedefinitions.json...
-      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPOSITORY_URI:$IMAGE_TAG" > imagedefinitions.json
-      - ls -la
-      - cat imagedefinitions.json
-      - echo "=== PWD ==="
-      - pwd
-      - echo "=== LIST FILES ==="
-      - ls -la
-      - echo "=== SHOW IMAGEDEFINITIONS ==="
-      - cat imagedefinitions.json || (echo "imagedefinitions.json NOT FOUND" && exit 1)
+      - echo Tagging image
 
-
-artifacts:
-  # Artifacts needed for ECS Deploy
-  files:
-    - imagedefinitions.json
-  discard-paths: yes
 
 
 
