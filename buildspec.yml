@@ -26,7 +26,10 @@ phases:
       - echo Pushing commit-tagged image to ECR...
       - docker push $REPOSITORY_URI:$IMAGE_TAG
 
-      - echo Tagging image
+      # Push latest image
+      - echo Tagging and pushing latest...
+      - docker tag $REPOSITORY_URI:$IMAGE_TAG $REPOSITORY_URI:latest
+      - docker push $REPOSITORY_URI:latest
 
 
 
