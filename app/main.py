@@ -9,6 +9,9 @@ from io import StringIO
 from datetime import datetime, timezone
 import re
 
+import pyarrow as pa
+import pyarrow.parquet as pq
+
 # =========================
 # Logging
 # =========================
@@ -27,8 +30,8 @@ logger = setup_logger()
 SOURCE_BUCKET = os.environ["SOURCE_BUCKET"]
 SOURCE_PREFIX = os.environ.get("SOURCE_PREFIX", "reddit_csv/")
 
-TARGET_BUCKET = os.environ.get("TARGET_BUCKET", SOURCE_BUCKET)
-TARGET_PREFIX = os.environ.get("TARGET_PREFIX", "reddit_nlp_csv/")
+CURATED_BUCKET = os.environ.get("CURATED_BUCKET", SOURCE_BUCKET)
+CURATED_PREFIX = os.environ.get("CURATED_PREFIX", "curated/reddit_posts/")
 
 s3 = boto3.client("s3")
 
@@ -147,6 +150,44 @@ def load_csv_from_s3(bucket, key):
     obj = s3.get_object(Bucket=bucket, Key=key)
     return pd.read_csv(obj["Body"])
 
+
+def write_parquet_partitioned_to_s3(df: pd.DataFrame, bucket: str, base_prefix: str):
+    """
+    Writes Parquet files partitioned by created_year/created_month
+    to: s3://bucket/base_prefix/created_year=YYYY/created_month=MM/part-....parquet
+    """
+    base_prefix = _ensure_trailing_slash(base_prefix)
+
+    # Ensure created_dt exists and is datetime
+    if "created_dt" not in df.columns:
+        raise ValueError("created_dt column is required for parquet partitioning")
+
+    df["created_dt"] = pd.to_datetime(df["created_dt"], errors="coerce", utc=True)
+    df = df[df["created_dt"].notna()].copy()
+
+    df["created_year"] = df["created_dt"].dt.year.astype(int)
+    df["created_month"] = df["created_dt"].dt.month.apply(lambda m: f"{m:02d}")
+
+    # Write each partition group as its own parquet file
+    for (yr, mo), part_df in df.groupby(["created_year", "created_month"], dropna=False):
+        local_path = f"/tmp/part-{uuid.uuid4().hex}.parquet"
+        table = pa.Table.from_pandas(part_df, preserve_index=False)
+        pq.write_table(table, local_path, compression="snappy")
+
+        out_key = (
+            f"{base_prefix}"
+            f"created_year={int(yr)}/created_month={mo}/"
+            f"part-{uuid.uuid4().hex}.parquet"
+        )
+
+        with open(local_path, "rb") as f:
+            s3.put_object(Bucket=bucket, Key=out_key, Body=f)
+
+        os.remove(local_path)
+
+    return {"bucket": bucket, "prefix": base_prefix}
+
+
 def write_csv_to_s3(df, bucket, base_prefix, ingest_dt):
     out_key = f"{_ensure_trailing_slash(base_prefix)}ingest_dt={ingest_dt}/part-{uuid.uuid4().hex}.csv"
 
@@ -186,6 +227,18 @@ def run_for_ingest_dt(ingest_dt: str):
         if col not in df.columns:
             raise ValueError(f"Missing expected column '{col}' in input CSV schema")
 
+    # Ensure created_dt exists (your weekly CSVs should already contain it)
+    if "created_dt" not in df.columns:
+        raise ValueError("Missing created_dt in weekly CSV. Required for curated parquet output.")
+
+
+    BASE_COLUMNS = ["id", "title", "selftext", "created_dt", "score", "subreddit"]
+    for c in BASE_COLUMNS:
+        if c not in df.columns:
+            raise ValueError(f"Missing expected column '{c}' in input CSV schema")
+
+    df = df[BASE_COLUMNS].copy()
+
     df["clean_title"] = df["title"].fillna("").apply(clean_text)
     df["clean_selftext"] = df["selftext"].fillna("").apply(clean_text)
     combined = (df["clean_title"] + " " + df["clean_selftext"]).fillna("")
@@ -195,13 +248,16 @@ def run_for_ingest_dt(ingest_dt: str):
 
     logger.info("Extracting keywords")
     df["keywords"] = extract_keywords(combined.tolist(), top_n=5)
+    df["keywords"] = df["keywords"].apply(json.dumps)
+
 
     df["processed_dt"] = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    out_key = write_csv_to_s3(df, TARGET_BUCKET, TARGET_PREFIX, ingest_dt)
-    logger.info(f"Wrote NLP output to s3://{TARGET_BUCKET}/{out_key}")
+    write_parquet_partitioned_to_s3(df, CURATED_BUCKET, CURATED_PREFIX)
+    logger.info(f"Wrote curated parquet to s3://{CURATED_BUCKET}/{CURATED_PREFIX}")
+    return {"rows_in": int(len(df)), "rows_out": int(len(df)), "ingest_dt": ingest_dt,
+            "output": f"s3://{CURATED_BUCKET}/{CURATED_PREFIX}"}
 
-    return {"rows_in": int(len(df)), "rows_out": int(len(df)), "ingest_dt": ingest_dt, "output": out_key}
 
 def pick_ingest_dt(event: dict) -> str:
     """
@@ -250,4 +306,12 @@ def main():
     print(run_for_ingest_dt(ingest_dt))
 
 if __name__ == "__main__":
-    main()
+    mode = os.environ.get("MODE", "weekly").lower()
+
+    if mode == "backfill":
+        # runs the one-off historical/legacy reprocess job
+        from backfill_historical import backfill
+        print(backfill())
+    else:
+        # runs the normal weekly pipeline
+        main()
