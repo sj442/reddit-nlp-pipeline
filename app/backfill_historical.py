@@ -13,8 +13,8 @@ logger.setLevel(logging.INFO)
 
 s3 = boto3.client("s3")
 
-INPUT_BUCKET = os.environ["INPUT_BUCKET"]
-CURATED_BUCKET = os.environ.get("CURATED_BUCKET", INPUT_BUCKET)
+SOURCE_BUCKET = os.environ["SOURCE_BUCKET"]
+CURATED_BUCKET = os.environ.get("CURATED_BUCKET", SOURCE_BUCKET)
 CURATED_PREFIX = os.environ.get("CURATED_PREFIX", "curated/reddit_posts/")
 
 BASE_COLUMNS = ["id", "title", "selftext", "created_dt", "score", "subreddit"]
@@ -48,7 +48,7 @@ def get_input_csv_keys() -> list[str]:
         prefixes = json.loads(prefixes_json)
         keys = []
         for p in prefixes:
-            keys.extend(list_csv_keys_under_prefix(INPUT_BUCKET, p))
+            keys.extend(list_csv_keys_under_prefix(SOURCE_BUCKET, p))
         keys = sorted(set(keys))
         if not keys:
             raise ValueError(f"No CSV files found under prefixes: {prefixes}")
@@ -87,7 +87,7 @@ def backfill():
     csv_keys = get_input_csv_keys()
 
     logger.info(f"Backfill reading {len(csv_keys)} CSV(s)")
-    df = pd.concat([load_csv_from_s3(INPUT_BUCKET, k) for k in csv_keys], ignore_index=True)
+    df = pd.concat([load_csv_from_s3(SOURCE_BUCKET, k) for k in csv_keys], ignore_index=True)
 
     # keep only base columns (drops old processed cols)
     missing = [c for c in BASE_COLUMNS if c not in df.columns]
