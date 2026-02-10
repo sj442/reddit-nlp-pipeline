@@ -56,8 +56,24 @@ from nltk.stem import WordNetLemmatizer
 nltk.download("stopwords", quiet=True)
 nltk.download("wordnet", quiet=True)
 
-STOPWORDS = set(stopwords.words("english"))
+ENGLISH_STOPWORDS = set(stopwords.words("english"))
 lemmatizer = WordNetLemmatizer()
+
+CUSTOM_STOPWORDS = {
+    "other","like","using","use","look","need","help","best",
+    "year","day","post","reddit","people","thing","things",
+    "way","make","know","want","good","bad","new","old",
+    "really","also","one","two","first","second"
+}
+
+GENAI_FILLER = {
+    "ai","model","models","llm","llms","gpt","chatgpt",
+    "openai","anthropic","claude"
+}
+
+STOPWORDS = ENGLISH_STOPWORDS.union(CUSTOM_STOPWORDS)
+STOPWORDS = STOPWORDS.union(GENAI_FILLER)
+
 
 def clean_text(text):
     if not text:
